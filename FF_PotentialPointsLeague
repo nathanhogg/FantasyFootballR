@@ -1,0 +1,208 @@
+# This script takes as its inputs an ESPN league ID and information about that
+#   league and outputs the actual points scored by each team, the most points
+#   that each team COULD have scored, and the resulting efficiency
+
+# Author: Nathan Hogg
+# Date: 1/10/2016
+
+rm(list = ls())
+
+# Packages required for this script:
+  library(rvest)
+  library(plyr)
+  library(stringr)
+  library(dplyr)
+  library(tidyr)
+  library(DT)
+
+# User inputs:
+  league_id <- 30173
+  league_size <- 10
+  # The number of starters at each position
+    s_qb <- 1
+    s_rb <- 2
+    s_wr <- 2
+    s_te <- 1
+    s_fx <- 2
+    s_ds <- 1
+    s_k  <- 0
+  # The number of weeks played so far in the season
+    weeks <- 13
+
+# Create a data frame for storing the results of each week
+potential_points <- data.frame(x = numeric(weeks), y = numeric(weeks))
+colnames(potential_points) <- c("act_points", "opt_points")
+
+league_points <- data.frame(x = character(league_size), y = numeric(league_size), z = numeric(league_size), a = numeric(league_size), stringsAsFactors = FALSE)
+colnames(league_points) <- c("team_name", "act_points", "opt_points", "eff")
+  
+# Create a loop for each team in the league
+for (a in 1:league_size) {
+
+# Create a loop for each week in the season
+for (i in 1:weeks) {
+
+# Obtain tables for starters and bench players
+url <- read_html(paste0("http://games.espn.go.com/ffl/boxscorequick?leagueId=",
+                   league_id, "&teamId=", a, "&scoringPeriodId=", i, 
+                   "&seasonId=2015&view=scoringperiod&version=quick"))
+
+starters <- html_table(html_nodes(url, "table")[[2]], fill = TRUE)
+if (i == 1) {
+  league_points$team_name[a] <- substr(as.character(starters[1,1]), 1, nchar(as.character(starters[1,1])) - 10)
+}
+bench <- html_table(html_nodes(url, "table")[[3]], fill = TRUE)
+
+# Perform data tidying on starters table
+colnames(starters) <- starters[3,]
+starters <- starters[-c(1,2,3),1:5]
+starters$PTS <- as.numeric(starters$PTS)
+starters <- separate(starters, 'PLAYER, TEAM POS', c("Player", "TeamPos"), sep = ", ", extra = "drop")
+starters$TeamPos <- gsub("\\s+", " ", starters$TeamPos)
+starters <- separate(starters, 'TeamPos', c("Team", "Pos"), 
+                      sep = " ", extra = "drop")
+starters$Pos[is.na(starters$Pos)] <- "D/ST"
+starters$PTS[is.na(starters$PTS)] <- 0
+
+# Perform data tidying on bench table
+colnames(bench) <- bench[1,]
+bench <- bench[-1,]
+bench$PTS <- as.numeric(bench$PTS)
+bench <- separate(bench, 'PLAYER, TEAM POS', c("Player", "TeamPos"), sep = ", ", extra = "drop")
+bench$TeamPos <- gsub("\\s+", " ", bench$TeamPos)
+bench <- separate(bench, 'TeamPos', c("Team", "Pos"), 
+                     sep = " ", extra = "drop")
+bench$Pos[is.na(bench$Pos)] <- "D/ST"
+bench$PTS[is.na(bench$PTS)] <- 0
+
+# Combine starters and bench into one data frame called "roster"
+roster <- rbind(starters, bench)
+
+# Determine the number of players at each position on the current roster
+n_qb <- length(roster$Pos[roster$Pos == "QB"])
+n_rb <- length(roster$Pos[roster$Pos == "RB"])
+n_wr <- length(roster$Pos[roster$Pos == "WR"])
+n_te <- length(roster$Pos[roster$Pos == "TE"])
+n_ds <- length(roster$Pos[roster$Pos == "D/ST"])
+n_k  <- length(roster$Pos[roster$Pos == "K"])
+
+# QB selection
+for (j in 1:s_qb) {
+  if (j == 1) {
+    opt_qb <- max(roster$PTS[roster$Pos == "QB"])
+  } else {
+    opt_qb <- opt_qb + sort(roster$PTS[roster$Pos == "QB"], 
+                          partial = n_qb - j + 1)[n_qb - j + 1]
+  }
+}
+
+# RB selection
+for (j in 1:s_rb) {
+  if (j == 1) {
+    opt_rb <- max(roster$PTS[roster$Pos == "RB"])
+  } else {
+    opt_rb <- opt_rb + sort(roster$PTS[roster$Pos == "RB"], 
+                            partial = n_rb - j + 1)[n_rb - j + 1]
+  }
+}
+
+# WR selection
+for (j in 1:s_wr) {
+  if (j == 1) {
+    opt_wr <- max(roster$PTS[roster$Pos == "WR"])
+  } else {
+    opt_wr <- opt_wr + sort(roster$PTS[roster$Pos == "WR"], 
+                            partial = n_wr - j + 1)[n_wr - j + 1]
+  }
+}
+
+# TE selection
+for (j in 1:s_te) {
+  if (j == 1) {
+    opt_te <- max(roster$PTS[roster$Pos == "TE"])
+  } else {
+    opt_te <- opt_te + sort(roster$PTS[roster$Pos == "TE"], 
+                            partial = n_te - j + 1)[n_te - j + 1]
+  }
+}
+
+# D/ST selection
+if (s_ds == 0) {
+  opt_ds = 0
+} else {
+  for (j in 1:s_ds) {
+    if (j == 1) {
+      opt_ds <- max(roster$PTS[roster$Pos == "D/ST"])
+    } else {
+      opt_ds <- opt_ds + sort(roster$PTS[roster$Pos == "D/ST"], 
+                            partial = n_ds - j + 1)[n_ds - j + 1]
+    }
+  }
+}
+
+# K selection
+if (s_k == 0) {
+  opt_k = 0
+} else {
+  for (j in 1:s_k) {
+    if (j == 1) {
+      opt_k <- max(roster$PTS[roster$Pos == "K"])
+    } else {
+      opt_k <- opt_k + sort(roster$PTS[roster$Pos == "K"], 
+                            partial = n_k - j + 1)[n_k - j + 1]
+    }
+  }
+}
+
+# Flex selection
+if (n_rb < s_rb + 1) {fx_rb1 <- 0} else {fx_rb1 <- sort(roster$PTS[roster$Pos == "RB"], partial = n_rb - s_rb)[n_rb - s_rb]}
+if (n_rb < s_rb + 2) {fx_rb2 <- 0} else {fx_rb2 <- sort(roster$PTS[roster$Pos == "RB"], partial = n_rb - s_rb - 1)[n_rb - s_rb - 1]}
+if (n_wr < s_wr + 1) {fx_wr1 <- 0} else {fx_wr1 <- sort(roster$PTS[roster$Pos == "WR"], partial = n_wr - s_wr)[n_wr - s_wr]}
+if (n_wr < s_wr + 2) {fx_wr2 <- 0} else {fx_wr2 <- sort(roster$PTS[roster$Pos == "WR"], partial = n_wr - s_wr - 1)[n_wr - s_wr - 1]}
+if (n_te < s_te + 1) {fx_te1 <- 0} else {fx_te1 <- sort(roster$PTS[roster$Pos == "TE"], partial = n_te - s_te)[n_te - s_te]}
+if (n_te < s_te + 2) {fx_te2 <- 0} else {fx_te2 <- sort(roster$PTS[roster$Pos == "TE"], partial = n_te - s_te - 1)[n_te - s_te - 1]}
+
+flex <- c(fx_rb1, fx_rb2, fx_wr1, fx_wr2, fx_te1, fx_te2)
+
+n_fx <- length(flex)
+
+if (s_fx == 0) {
+  opt_fx <- 0
+} else {
+  for (j in 1:s_fx) {
+    if (j == 1) {
+      opt_fx <- max(flex)
+    } else {
+      opt_fx <- opt_fx + sort(flex, partial = n_fx - j + 1)[n_fx - j + 1]
+    }
+  }
+}
+
+# Compute points for this week
+potential_points$act_points[i] <- sum(starters$PTS)
+potential_points$opt_points[i] <- opt_qb + opt_rb + opt_wr + opt_te + opt_ds + opt_k + opt_fx
+
+}
+
+# Compute the efficiency for each week
+potential_points$eff <- potential_points$act_points / potential_points$opt_points * 100
+
+# Compute the total actual points vs. total optimal points
+total_act <- sum(potential_points$act_points)
+total_opt <- sum(potential_points$opt_points)
+total_eff <- total_act / total_opt * 100
+
+league_points$act_points[a] <- total_act
+league_points$opt_points[a] <- total_opt
+league_points$eff[a] <- total_eff
+
+# Publish the current status of the for loops
+status <- paste0("Finished analyzing Team ",a," out of ", league_size)
+print(status)
+
+}
+
+league_points$eff <- round(league_points$eff, digits = 2)
+
+# Print results into the viewer
+datatable(league_points)
