@@ -1,10 +1,19 @@
-# Script Name:  FF_FAAB
+# Script Name:  FF_FAAB.R
 #      Author:  Nathan Hogg
 #  Orig. Date:  1/13/2016
 #    Overview:  This script seeks to analyze how FAAB dollars are spent in an
 #               ESPN fantasy football league
+# Inputs:
+#   1) league_id - ESPN league ID, can be found from the URL of the league page
+#   2) start_date, end_date - Dates to being and end scraping of FAAB report
+#   2) qb_ref, rb_ref, etc. - Reference player for player valuation calculations
+#
+# Outputs:
+#   1) faab_log - log of all FAAB activitiy in
+#   2) faab_team - summary of faab_log by each fantasy team in the league
+#   3) faab_pos - summary of faab_log by fantasy position
 
-rm(list = ls())
+rm(list = ls())  # Clear any unwanted variables / lists / etc.
 
 # Load the necessary packages for this program
 library(rvest)
@@ -16,53 +25,63 @@ library(DT)
 library(reshape2)
 library(ggplot2)
 
-# Input the ESPN league ID to be analyzed
-#   Note: league must be "viewable to the public" in league settings
-league_id <- 367938 # 30173, 367938
-
-# Input the reference for each position for Value Over Replacement Player (VORP) calculations
+# Input variables
+league_id <- 367938  # Note: ESPN league must be "viewable to public"
+start_date <- "2015/09/01"
+end_date <- "2016/01/04"
 qb_ref <- 12
-rb_ref <- 33
-wr_ref <- 33
+rb_ref <- 36
+wr_ref <- 40
 te_ref <- 12
 
-# --- SECTION 1: OBTAINING FAAB_LOG, A HISTORY OF SEASON FAAB BIDS ------------
+## SECTION 1: OBTAINING FAAB_LOG, A HISTORY OF SEASON FAAB BIDS --------------
 
-date_list <- seq(as.Date("2015/09/01"), as.Date("2016/01/04"), "days")
-date_list <- gsub("-", "", date_list)
+# Create a list of every date between start_date and end_date
+date_list <- seq(as.Date(start_date), as.Date(end_date), "days")
+date_list <- gsub("-", "", date_list)  # format date in ESPN url format
+n_dates <- length(date_list)  # count the number of dates in date_list
 
-n_days <- length(date_list)
+# Create empty data.frame to update every time new log information is scraped
+faab_log <- data.frame(FF_Team = character(0), Player = character(0), 
+                       Bid = character(0), Outcome = character(0), Date = character(0))
 
-faab_log <- data.frame(FF_Team = character(0), Player = character(0), Bid = character(0), Outcome = character(0), Date = character(0))
+# Loop over all dates in the date_list and update faab_log as needed
+for (i in 1:n_dates) {
+  # Build url for the league and with the current date in the loop
+  url_date <- read_html(paste0("http://games.espn.go.com/ffl/waiverreport?leagueId=", 
+                               league_id, "&date=", date_list[i]))
 
-for (i in 1:n_days) {
-  url_date <- read_html(paste0("http://games.espn.go.com/ffl/waiverreport?leagueId=", league_id, "&date=", date_list[i]))
-
-  # This table will test whether or not any transactions were processed on the current date
+  # Build table to test whether any transactions were processed on the current date
   test_table <- html_table(html_nodes(url_date, "table")[[1]], fill = TRUE)
   
+  # If no trans occurred, ncol(test_table) will be 1; Otherwise, it will be > 1
   if (ncol(test_table) == 1) {
+    # Print results of FAAB activity on the current date
     print(paste0(date_list[i], " - No transactions"))
     
   } else {
+    # Build table with activity that occurred on the current date and format
     current_date_table <- html_table(html_nodes(url_date, "table")[[2]], fill = TRUE)
-    current_date_table <- current_date_table[-c(1,2), -c(1)]
+    current_date_table <- current_date_table[-c(1,2), -c(1)]  # remove rows/cols
     colnames(current_date_table) <- c("FF_Team", "Player", "Bid", "Outcome")
-    current_date_table$Date <- date_list[i]
+    current_date_table$Date <- date_list[i]  # Add the current date to the log
+    
+    # Merge the faab_log with the current_date_table
     faab_log <- rbind(faab_log, current_date_table)
     
+    # Print results of FAAB activity on the current date
     print(paste0(date_list[i], " - ", nrow(current_date_table), " bid(s), ", length(unique(current_date_table$Player)), " transaction(s)"))
     
   }
-
+  
+  # Remove un-needed tables
   remove(current_date_table, test_table)
 }
 
-# --- SECTION 2: CLEANING UP FAAB_LOG -----------------------------------------
+## SECTION 2: CLEANING UP FAAB_LOG --------------------------------------------
 
 # Save the faab_log as a .csv file so it doesn't need to be re-downloaded later
-save(faab_log, file = "faab_log.csv")
-# load("faab_log.csv")
+save(faab_log, file = "faab_log.csv")  # load("faab_log.csv")
 
 # Convert the bid column to numerical, and the date column to a date
 faab_log$Bid <- as.character(faab_log$Bid)
@@ -70,8 +89,9 @@ faab_log$Bid <- substr(faab_log$Bid, 2, nchar(faab_log$Bid))
 faab_log$Bid <- as.numeric(faab_log$Bid)
 faab_log$Date <- as.Date(faab_log$Date, "%Y%m%d")
 
-# Separate out player, team, and position
-faab_log <- separate(faab_log, 'Player', c("Added_Player", "Added_TeamPos"), sep = ", ", extra = "drop")
+# Separate out player, team, and position into new columns
+faab_log <- separate(faab_log, 'Player', c("Added_Player", "Added_TeamPos"), 
+                     sep = ", ", extra = "drop")
 faab_log$Added_Player <- gsub("\\*", "", faab_log$Added_Player)
 faab_log$Added_TeamPos <- gsub("\\s+", " ", faab_log$Added_TeamPos)
 faab_log <- separate(faab_log, 'Added_TeamPos', c("Added_Team", "Added_Pos"), 
@@ -107,7 +127,7 @@ faab_log <- separate(faab_log, 'Dropped_TeamPos', c("Dropped_Team", "Dropped_Pos
 faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE] <- substr(faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE], 1, 
                                                       nchar(faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE]) - 5)
 
-# --- SECTION 3: ADDING PRO-FOOTBALL-REFERENCE TO FAAB_LOG --------------------
+## SECTION 3: ADDING PRO-FOOTBALL-REFERENCE TO FAAB_LOG -----------------------
 
 # Get pro-football-reference fantasy table for the current season
 url_pfr <- read_html("http://www.pro-football-reference.com/years/2015/fantasy.htm")
@@ -129,13 +149,14 @@ for (i in c(3:19,21:26)) {
   pfr[, i] <- as.numeric(pfr[, i])
 }
 
-# If Fant_Pts is NA, make it 0
+# If Fant_Pts is NA, set it to 0
 pfr$Fant_Pts[is.na(pfr$Fant_Pts)] <- 0
 
 # Add Fant_PPG and Fant_PPGS columns
 pfr$Fant_PPG <- pfr$Fant_Pts / pfr$G
 pfr$Fant_PPGS <- pfr$Fant_Pts / pfr$GS
 
+# If Fant_PPG/S is infinite, set it to 0
 pfr$Fant_PPG[is.infinite(pfr$Fant_PPG)] <- 0
 pfr$Fant_PPGS[is.infinite(pfr$Fant_PPGS)] <- 0
 
@@ -209,54 +230,72 @@ faab_log$Added_VORP_pts[faab_log$Success == "No"] <- NA
 faab_log$Added_VORP_ppg[faab_log$Success == "No"] <- NA
 faab_log$Added_VORP_ppgs[faab_log$Success == "No"] <- NA
 
-# --- SECTION 4: CREATE OUTPUT TABLES TO SUMMARIZE THE DATA ----------------------
+## SECTION 4: CREATE OUTPUT TABLES TO SUMMARIZE THE DATA -------------------------
 
+# Build a table to summarize faab_log by fantasy football team
 faab_team <- data.frame(FF_Team = unique(faab_log$FF_Team))
 n_team <- nrow(faab_team)
 
+# Loop over each team and calculate relevant stats
 for (i in 1:n_team) {
+  # Add the amount of FAAB budget a team had remaining
+  faab_team$Remaining[i] <- 100 - sum(faab_log$Bid[faab_log$FF_Team == faab_team[i,1]])
+  
+  # Add the number of bids and adds the team made
   faab_team$Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1])
   faab_team$Adds[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Success == "Yes")
+  
+  # Add stats on the dollar amounts bid 
   faab_team$Avg_Bid[i] <- round(mean(faab_log$Bid[faab_log$FF_Team == faab_team[i,1]]), digits = 2)
   faab_team$Avg_Add_Cost[i] <- round(mean(faab_log$Bid[faab_log$FF_Team == faab_team[i,1] & faab_log$Success == "Yes"]), digits = 2)
   faab_team$Max_Bid[i] <- max(faab_log$Bid[faab_log$FF_Team == faab_team[i,1]])
   faab_team$Med_Bid[i] <- median(faab_log$Bid[faab_log$FF_Team == faab_team[i,1]])
   
+  # Add a breakdown for how the team bid on different positions
   faab_team$QB_Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_Pos == "QB")
   faab_team$RB_Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_Pos == "RB")
   faab_team$WR_Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_Pos == "WR")
   faab_team$TE_Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_Pos == "TE")
   faab_team$DST_Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_Pos == "D/ST")
   
+  # Show how much VORP and VORP_ppg the team added in their acquisitions
   faab_team$VORP_Added[i] <- sum(faab_log$Added_VORP_pts[faab_log$FF_Team == faab_team[i,1] & faab_log$Added_VORP_pts > 0 & !is.na(faab_log$Added_VORP_pts)])
   faab_team$VORP_PPG_Added[i] <- round(sum(faab_log$Added_VORP_ppg[faab_log$FF_Team == faab_team[i,1] & faab_log$Added_VORP_ppg > 0 & !is.na(faab_log$Added_VORP_ppg)]), digits = 2)
   
+  # Show the number of players with positive VORP and VORP_ppg the team added
   faab_team$Pos_VORP_Adds[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_VORP_pts > 0 & faab_log$Success == "Yes" & !is.na(faab_log$Added_VORP_pts))
   faab_team$Pos_VORP_PPG_Adds[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Added_VORP_ppg > 0 & faab_log$Success == "Yes" & !is.na(faab_log$Added_VORP_ppg))
   
+  # Show how much VORP and VORP_ppg the team dropped
   faab_team$VORP_Dropped[i] <- sum(faab_log$Dropped_VORP_pts[faab_log$FF_Team == faab_team[i,1] & faab_log$Dropped_VORP_pts > 0 & !is.na(faab_log$Dropped_VORP_pts)])
   faab_team$VORP_PPG_Dropped[i] <- round(sum(faab_log$Dropped_VORP_ppg[faab_log$FF_Team == faab_team[i,1] & faab_log$Dropped_VORP_ppg > 0 & !is.na(faab_log$Dropped_VORP_ppg)]), digits = 2)
 }
 
-# A table to look at how FAAB budget was spent on different positions
+# Build a table to look at how FAAB budget was spent on different positions
 faab_pos <- data.frame(Position = unique(faab_log$Added_Pos[!is.na(faab_log$Added_Pos)]))
 n_pos <- nrow(faab_pos)
 
+# Loop over each position and calculate relevant stats
 for (i in 1:n_pos) {
+  # Add the count of bids and adds for the position
   faab_pos$Bids[i] <- sum(faab_log$Added_Pos == faab_pos[i,1])
   faab_pos$Adds[i] <- sum(faab_log$Added_Pos == faab_pos[i,1] & faab_log$Success == "Yes")
   
+  # Add stats on the bid and add cost for the position
   faab_pos$Avg_Bid[i] <- round(mean(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1]]), digits = 2)
   faab_pos$Avg_Add_Cost[i] <- round(mean(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1] & faab_log$Success == "Yes"]), digits = 2)
   faab_pos$Max_Bid[i] <- max(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1]])
   faab_pos$Med_Bid[i] <- median(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1]])
   
+  # Add the amount of VORP and VORP_ppg added by position
   faab_pos$VORP_Added[i] <- sum(faab_log$Added_VORP_pts[faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_pts > 0 & !is.na(faab_log$Added_VORP_pts)])
   faab_pos$VORP_PPG_Added[i] <- round(sum(faab_log$Added_VORP_ppg[faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_ppg > 0 & !is.na(faab_log$Added_VORP_ppg)]), digits = 2)
 
+  # Add the number of players added with positive VORP and VORP_ppg at the position
   faab_pos$Pos_VORP_Adds[i] <- sum(faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_pts > 0 & faab_log$Success == "Yes" & !is.na(faab_log$Added_VORP_pts))
   faab_pos$Pos_VORP_PPG_Adds[i] <- sum(faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_ppg > 0 & faab_log$Success == "Yes" & !is.na(faab_log$Added_VORP_ppg))
   
+  # Add the amount of VORP and VORP_ppg dropped by position
   faab_pos$VORP_Dropped[i] <- sum(faab_log$Dropped_VORP_pts[faab_log$Dropped_Pos == faab_pos[i,1] & faab_log$Dropped_VORP_pts > 0 & !is.na(faab_log$Dropped_VORP_pts)])
   faab_pos$VORP_PPG_Dropped[i] <- round(sum(faab_log$Dropped_VORP_ppg[faab_log$Dropped_Pos == faab_pos[i,1] & faab_log$Dropped_VORP_ppg > 0 & !is.na(faab_log$Dropped_VORP_ppg)]), digits = 2)
 }
