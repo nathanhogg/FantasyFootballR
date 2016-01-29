@@ -3,13 +3,14 @@
 #  Orig. Date:  1/13/2016
 #    Overview:  This script seeks to analyze how FAAB dollars are spent in an
 #               ESPN fantasy football league
+# 
 # Inputs:
 #   1) league_id - ESPN league ID, can be found from the URL of the league page
-#   2) start_date, end_date - Dates to being and end scraping of FAAB report
-#   2) qb_ref, rb_ref, etc. - Reference player for player valuation calculations
+#   2) start_date, end_date - Dates to begin scraping and end scraping of FAAB report
+#   2) qb_ref, rb_ref, etc. - Reference player for player value-over-replacement calculations
 #
 # Outputs:
-#   1) faab_log - log of all FAAB activitiy in
+#   1) faab_log - log of all FAAB activitiy in a fantasy league
 #   2) faab_team - summary of faab_log by each fantasy team in the league
 #   3) faab_pos - summary of faab_log by fantasy position
 
@@ -81,7 +82,7 @@ for (i in 1:n_dates) {
 ## SECTION 2: CLEANING UP FAAB_LOG --------------------------------------------
 
 # Save the faab_log as a .csv file so it doesn't need to be re-downloaded later
-save(faab_log, file = "faab_log.csv")  # load("faab_log.csv")
+save(faab_log, file = "faab_log.csv")  # load("faab_log.csv") # if needed
 
 # Convert the bid column to numerical, and the date column to a date
 faab_log$Bid <- as.character(faab_log$Bid)
