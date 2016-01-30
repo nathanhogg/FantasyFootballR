@@ -27,13 +27,13 @@ library(reshape2)
 library(ggplot2)
 
 # Input variables
-league_id <- 367938  # Note: ESPN league must be "viewable to public"
+league_id <- 30173  # Note: ESPN league must be "viewable to public"
 start_date <- "2015/09/01"
 end_date <- "2016/01/04"
-qb_ref <- 12
-rb_ref <- 36
-wr_ref <- 40
-te_ref <- 12
+qb_ref <- 11
+rb_ref <- 27
+wr_ref <- 35
+te_ref <- 11
 
 ## SECTION 1: OBTAINING FAAB_LOG, A HISTORY OF SEASON FAAB BIDS --------------
 
@@ -51,7 +51,7 @@ for (i in 1:n_dates) {
   # Build url for the league and with the current date in the loop
   url_date <- read_html(paste0("http://games.espn.go.com/ffl/waiverreport?leagueId=", 
                                league_id, "&date=", date_list[i]))
-
+  
   # Build table to test whether any transactions were processed on the current date
   test_table <- html_table(html_nodes(url_date, "table")[[1]], fill = TRUE)
   
@@ -110,8 +110,8 @@ faab_log$Drop[grepl("dropped", faab_log$Outcome) == FALSE] <- "No"
 
 # Add a column with the player dropped if dropped column = "Yes"
 faab_log$Dropped_Player[faab_log$Drop == "Yes"] <- substr(faab_log$Outcome[faab_log$Drop == "Yes"], 
-                                                                                regexpr("dropped", faab_log$Outcome[faab_log$Drop == "Yes"])[1] + 5, 
-                                                                                nchar(faab_log$Outcome[faab_log$Drop == "Yes"]) - 12)
+                                                          regexpr("dropped", faab_log$Outcome[faab_log$Drop == "Yes"])[1] + 5, 
+                                                          nchar(faab_log$Outcome[faab_log$Drop == "Yes"]) - 12)
 x <- colsplit(faab_log$Dropped_Player, " ", c("Crap", "Player_Name"))
 faab_log$Player_Name <- x$Player_Name
 faab_log <- faab_log[ , -c(10)]
@@ -122,11 +122,11 @@ faab_log <- separate(faab_log, 'Player_Name', c("Dropped_Player", "Dropped_TeamP
 faab_log$Dropped_Player <- gsub("\\*", "", faab_log$Dropped_Player)
 faab_log$Dropped_TeamPos <- gsub("\\s+", " ", faab_log$Dropped_TeamPos)
 faab_log <- separate(faab_log, 'Dropped_TeamPos', c("Dropped_Team", "Dropped_Pos"), 
-                           sep = " ", extra = "drop")
+                     sep = " ", extra = "drop")
 
 # Remove the double "D/ST" for defenses in the players column
 faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE] <- substr(faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE], 1, 
-                                                      nchar(faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE]) - 5)
+                                                                    nchar(faab_log$Added_Player[is.na(faab_log$Added_Team) == TRUE]) - 5)
 
 ## SECTION 3: ADDING PRO-FOOTBALL-REFERENCE TO FAAB_LOG -----------------------
 
@@ -169,49 +169,49 @@ pfr_te <- pfr[pfr$Pos == "TE", ]
 
 # Find the Xth highest value for the Fant_Pts, Fant_PPG, and Fant_PPGS
 
-  # QB VORP - use the 12th highest qb
-  n_qb <- nrow(pfr_qb)
-  qb_rp_pts <- sort(pfr_qb$Fant_Pts, partial = n_qb - qb_ref + 1)[n_qb - qb_ref + 1]
-  qb_rp_ppg <- sort(pfr_qb$Fant_PPG, partial = n_qb - qb_ref + 1)[n_qb - qb_ref + 1]
-  qb_rp_ppgs <- sort(pfr_qb$Fant_PPGS, partial = n_qb - qb_ref + 1)[n_qb - qb_ref + 1]
-  pfr_qb$VORP_pts <- pfr_qb$Fant_Pts - qb_rp_pts
-  pfr_qb$VORP_ppg <- pfr_qb$Fant_PPG - qb_rp_ppg
-  pfr_qb$VORP_ppgs <- pfr_qb$Fant_PPGS - qb_rp_ppgs
-  remove(n_qb, qb_rp_pts, qb_rp_ppg, qb_rp_ppgs)
-  
-  # RB VORP - use the 36th highest rb
-  n_rb <- nrow(pfr_rb)
-  rb_rp_pts <- sort(pfr_rb$Fant_Pts, partial = n_rb - rb_ref + 1)[n_rb - rb_ref + 1]
-  rb_rp_ppg <- sort(pfr_rb$Fant_PPG, partial = n_rb - rb_ref + 1)[n_rb - rb_ref + 1]
-  rb_rp_ppgs <- sort(pfr_rb$Fant_PPGS, partial = n_rb - rb_ref + 1)[n_rb - rb_ref + 1]
-  pfr_rb$VORP_pts <- pfr_rb$Fant_Pts - rb_rp_pts
-  pfr_rb$VORP_ppg <- pfr_rb$Fant_PPG - rb_rp_ppg
-  pfr_rb$VORP_ppgs <- pfr_rb$Fant_PPGS - rb_rp_ppgs
-  remove(n_rb, rb_rp_pts, rb_rp_ppg, rb_rp_ppgs)
-  
-  # WR VORP - use the 36th highest qb
-  n_wr <- nrow(pfr_wr)
-  wr_rp_pts <- sort(pfr_wr$Fant_Pts, partial = n_wr - wr_ref + 1)[n_wr - wr_ref + 1]
-  wr_rp_ppg <- sort(pfr_wr$Fant_PPG, partial = n_wr - wr_ref + 1)[n_wr - wr_ref + 1]
-  wr_rp_ppgs <- sort(pfr_wr$Fant_PPGS, partial = n_wr - wr_ref + 1)[n_wr - wr_ref + 1]
-  pfr_wr$VORP_pts <- pfr_wr$Fant_Pts - wr_rp_pts
-  pfr_wr$VORP_ppg <- pfr_wr$Fant_PPG - wr_rp_ppg
-  pfr_wr$VORP_ppgs <- pfr_wr$Fant_PPGS - wr_rp_ppgs
-  remove(n_wr, wr_rp_pts, wr_rp_ppg, wr_rp_ppgs)
-  
-  # TE VORP - use the 12th highest te
-  n_te <- nrow(pfr_te)
-  te_rp_pts <- sort(pfr_te$Fant_Pts, partial = n_te - te_ref + 1)[n_te - te_ref + 1]
-  te_rp_ppg <- sort(pfr_te$Fant_PPG, partial = n_te - te_ref + 1)[n_te - te_ref + 1]
-  te_rp_ppgs <- sort(pfr_te$Fant_PPGS, partial = n_te - te_ref + 1)[n_te - te_ref + 1]
-  pfr_te$VORP_pts <- pfr_te$Fant_Pts - te_rp_pts
-  pfr_te$VORP_ppg <- pfr_te$Fant_PPG - te_rp_ppg
-  pfr_te$VORP_ppgs <- pfr_te$Fant_PPGS - te_rp_ppgs
-  remove(n_te, te_rp_pts, te_rp_ppg, te_rp_ppgs)
-  
+# QB VORP - use the 12th highest qb
+n_qb <- nrow(pfr_qb)
+qb_rp_pts <- sort(pfr_qb$Fant_Pts, partial = n_qb - qb_ref + 1)[n_qb - qb_ref + 1]
+qb_rp_ppg <- sort(pfr_qb$Fant_PPG, partial = n_qb - qb_ref + 1)[n_qb - qb_ref + 1]
+qb_rp_ppgs <- sort(pfr_qb$Fant_PPGS, partial = n_qb - qb_ref + 1)[n_qb - qb_ref + 1]
+pfr_qb$VORP_pts <- pfr_qb$Fant_Pts - qb_rp_pts
+pfr_qb$VORP_ppg <- pfr_qb$Fant_PPG - qb_rp_ppg
+pfr_qb$VORP_ppgs <- pfr_qb$Fant_PPGS - qb_rp_ppgs
+remove(n_qb, qb_rp_pts, qb_rp_ppg, qb_rp_ppgs)
+
+# RB VORP - use the 36th highest rb
+n_rb <- nrow(pfr_rb)
+rb_rp_pts <- sort(pfr_rb$Fant_Pts, partial = n_rb - rb_ref + 1)[n_rb - rb_ref + 1]
+rb_rp_ppg <- sort(pfr_rb$Fant_PPG, partial = n_rb - rb_ref + 1)[n_rb - rb_ref + 1]
+rb_rp_ppgs <- sort(pfr_rb$Fant_PPGS, partial = n_rb - rb_ref + 1)[n_rb - rb_ref + 1]
+pfr_rb$VORP_pts <- pfr_rb$Fant_Pts - rb_rp_pts
+pfr_rb$VORP_ppg <- pfr_rb$Fant_PPG - rb_rp_ppg
+pfr_rb$VORP_ppgs <- pfr_rb$Fant_PPGS - rb_rp_ppgs
+remove(n_rb, rb_rp_pts, rb_rp_ppg, rb_rp_ppgs)
+
+# WR VORP - use the 36th highest qb
+n_wr <- nrow(pfr_wr)
+wr_rp_pts <- sort(pfr_wr$Fant_Pts, partial = n_wr - wr_ref + 1)[n_wr - wr_ref + 1]
+wr_rp_ppg <- sort(pfr_wr$Fant_PPG, partial = n_wr - wr_ref + 1)[n_wr - wr_ref + 1]
+wr_rp_ppgs <- sort(pfr_wr$Fant_PPGS, partial = n_wr - wr_ref + 1)[n_wr - wr_ref + 1]
+pfr_wr$VORP_pts <- pfr_wr$Fant_Pts - wr_rp_pts
+pfr_wr$VORP_ppg <- pfr_wr$Fant_PPG - wr_rp_ppg
+pfr_wr$VORP_ppgs <- pfr_wr$Fant_PPGS - wr_rp_ppgs
+remove(n_wr, wr_rp_pts, wr_rp_ppg, wr_rp_ppgs)
+
+# TE VORP - use the 12th highest te
+n_te <- nrow(pfr_te)
+te_rp_pts <- sort(pfr_te$Fant_Pts, partial = n_te - te_ref + 1)[n_te - te_ref + 1]
+te_rp_ppg <- sort(pfr_te$Fant_PPG, partial = n_te - te_ref + 1)[n_te - te_ref + 1]
+te_rp_ppgs <- sort(pfr_te$Fant_PPGS, partial = n_te - te_ref + 1)[n_te - te_ref + 1]
+pfr_te$VORP_pts <- pfr_te$Fant_Pts - te_rp_pts
+pfr_te$VORP_ppg <- pfr_te$Fant_PPG - te_rp_ppg
+pfr_te$VORP_ppgs <- pfr_te$Fant_PPGS - te_rp_ppgs
+remove(n_te, te_rp_pts, te_rp_ppg, te_rp_ppgs)
+
 # Recombine positional tables back into the big pfr table
 pfr <- rbind(pfr_qb, pfr_rb, pfr_wr, pfr_te)
-    
+
 # Match VORP data with faab_log for both adds and drops
 index <- pfr$Player
 values_1 <- pfr$VORP_pts
@@ -240,12 +240,13 @@ n_team <- nrow(faab_team)
 # Loop over each team and calculate relevant stats
 for (i in 1:n_team) {
   # Add the amount of FAAB budget a team had remaining
-  faab_team$Remaining[i] <- 100 - sum(faab_log$Bid[faab_log$FF_Team == faab_team[i,1]])
+  faab_team$Remaining[i] <- 100 - sum(faab_log$Bid[faab_log$FF_Team == faab_team[i,1] & faab_log$Success == "Yes"])
   
   # Add the number of bids and adds the team made
   faab_team$Bids[i] <- sum(faab_log$FF_Team == faab_team[i,1])
   faab_team$Adds[i] <- sum(faab_log$FF_Team == faab_team[i,1] & faab_log$Success == "Yes")
-  
+  faab_team$Success_Rate[i] <- faab_team$Adds[i] / faab_team$Bids[i] 
+    
   # Add stats on the dollar amounts bid 
   faab_team$Avg_Bid[i] <- round(mean(faab_log$Bid[faab_log$FF_Team == faab_team[i,1]]), digits = 2)
   faab_team$Avg_Add_Cost[i] <- round(mean(faab_log$Bid[faab_log$FF_Team == faab_team[i,1] & faab_log$Success == "Yes"]), digits = 2)
@@ -285,13 +286,14 @@ for (i in 1:n_pos) {
   # Add stats on the bid and add cost for the position
   faab_pos$Avg_Bid[i] <- round(mean(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1]]), digits = 2)
   faab_pos$Avg_Add_Cost[i] <- round(mean(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1] & faab_log$Success == "Yes"]), digits = 2)
+  faab_pos$Total_Spent[i] <- round(faab_pos$Adds[i] * faab_pos$Avg_Add_Cost[i])
   faab_pos$Max_Bid[i] <- max(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1]])
   faab_pos$Med_Bid[i] <- median(faab_log$Bid[faab_log$Added_Pos == faab_pos[i,1]])
   
   # Add the amount of VORP and VORP_ppg added by position
   faab_pos$VORP_Added[i] <- sum(faab_log$Added_VORP_pts[faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_pts > 0 & !is.na(faab_log$Added_VORP_pts)])
   faab_pos$VORP_PPG_Added[i] <- round(sum(faab_log$Added_VORP_ppg[faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_ppg > 0 & !is.na(faab_log$Added_VORP_ppg)]), digits = 2)
-
+  
   # Add the number of players added with positive VORP and VORP_ppg at the position
   faab_pos$Pos_VORP_Adds[i] <- sum(faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_pts > 0 & faab_log$Success == "Yes" & !is.na(faab_log$Added_VORP_pts))
   faab_pos$Pos_VORP_PPG_Adds[i] <- sum(faab_log$Added_Pos == faab_pos[i,1] & faab_log$Added_VORP_ppg > 0 & faab_log$Success == "Yes" & !is.na(faab_log$Added_VORP_ppg))
@@ -299,4 +301,116 @@ for (i in 1:n_pos) {
   # Add the amount of VORP and VORP_ppg dropped by position
   faab_pos$VORP_Dropped[i] <- sum(faab_log$Dropped_VORP_pts[faab_log$Dropped_Pos == faab_pos[i,1] & faab_log$Dropped_VORP_pts > 0 & !is.na(faab_log$Dropped_VORP_pts)])
   faab_pos$VORP_PPG_Dropped[i] <- round(sum(faab_log$Dropped_VORP_ppg[faab_log$Dropped_Pos == faab_pos[i,1] & faab_log$Dropped_VORP_ppg > 0 & !is.na(faab_log$Dropped_VORP_ppg)]), digits = 2)
+}
+
+# Show the n_display players added for the most FAAB dollars
+n_display <- 10
+
+top_cost <- data.frame(Player = character(n_display), Pos = character(n_display),
+                       Add_Cost = numeric(n_display), Date = character(n_display),
+                       Add_Team = character(n_display), VORP = numeric(n_display), 
+                       VORP_ppg = numeric(n_display), Other_Bidders = character(n_display),
+                       stringsAsFactors = FALSE)
+
+add_log <- faab_log[faab_log$Success == "Yes",]
+add_log <- add_log[with(add_log, order(-Bid)), ]
+
+for (i in 1:n_display) {
+  top_cost$Player[i] <- as.character(add_log$Added_Player[i])
+  top_cost$Pos[i] <- add_log$Added_Pos[i]
+  top_cost$Add_Cost[i] <- add_log$Bid[i]
+  top_cost$Date[i] <- add_log$Date[i]
+  top_cost$Add_Team[i] <- add_log$FF_Team[i]
+  top_cost$VORP[i] <- add_log$Added_VORP_pts[i]
+  top_cost$VORP_ppg[i] <- add_log$Added_VORP_ppg[i]
+  
+  list <- faab_log[faab_log$Added_Player == top_cost$Player[i] & faab_log$Success == "No", c(1, 5)]
+
+  if (nrow(list) > 0) {
+    list$combo <- paste0(list$FF_Team, " ($", list$Bid, ")")
+    all_bids <- as.character(list$combo[1])
+    if (nrow(list) > 1) {
+      for (j in 2:nrow(list)) {
+        all_bids <- paste0(all_bids, ", ", list$combo[j])
+      }
+    }
+    top_cost$Other_Bidders[i] <- all_bids
+  }
+}
+
+# Show the n_display players with the highest VORP
+n_display <- 10
+
+top_VORP <- data.frame(Player = character(n_display), Pos = character(n_display),
+                       Add_Cost = numeric(n_display), Date = character(n_display),
+                       Add_Team = character(n_display), VORP = numeric(n_display), 
+                       VORP_ppg = numeric(n_display), Other_Bidders = character(n_display),
+                       stringsAsFactors = FALSE)
+
+add_log <- faab_log[faab_log$Success == "Yes",]
+add_log <- add_log[with(add_log, order(-Added_VORP_pts)), ]
+
+for (i in 1:n_display) {
+  top_VORP$Player[i] <- as.character(add_log$Added_Player[i])
+  top_VORP$Pos[i] <- add_log$Added_Pos[i]
+  top_VORP$Add_Cost[i] <- add_log$Bid[i]
+  top_VORP$Date[i] <- add_log$Date[i]
+  top_VORP$Add_Team[i] <- add_log$FF_Team[i]
+  top_VORP$VORP[i] <- add_log$Added_VORP_pts[i]
+  top_VORP$VORP_ppg[i] <- add_log$Added_VORP_ppg[i]
+  
+  list <- faab_log[faab_log$Added_Player == top_VORP$Player[i] & faab_log$Success == "No", c(1, 5)]
+  
+  if (nrow(list) > 0) {
+    list$combo <- paste0(list$FF_Team, " ($", list$Bid, ")")
+    all_bids <- as.character(list$combo[1])
+    if (nrow(list) > 1) {
+      for (j in 2:nrow(list)) {
+        all_bids <- paste0(all_bids, ", ", list$combo[j])
+      }
+    }
+    top_VORP$Other_Bidders[i] <- all_bids
+  }
+}
+
+# Show the n_display players with the highest value (VORP/Bid)
+n_display <- 10
+
+top_value <- data.frame(Player = character(n_display), Pos = character(n_display),
+                       Add_Cost = numeric(n_display), Date = character(n_display),
+                       Add_Team = character(n_display), VORP = numeric(n_display), 
+                       VORP_ppg = numeric(n_display), Value = numeric(n_display),
+                       Other_Bidders = character(n_display), stringsAsFactors = FALSE)
+
+add_log <- faab_log[faab_log$Success == "Yes",]
+add_log$Value <- add_log$Added_VORP_pts / add_log$Bid
+add_log <- add_log[with(add_log, order(-Value)), ]
+
+for (i in 1:n_display) {
+  top_value$Player[i] <- as.character(add_log$Added_Player[i])
+  top_value$Pos[i] <- add_log$Added_Pos[i]
+  top_value$Add_Cost[i] <- add_log$Bid[i]
+  top_value$Date[i] <- add_log$Date[i]
+  top_value$Add_Team[i] <- add_log$FF_Team[i]
+  top_value$VORP[i] <- add_log$Added_VORP_pts[i]
+  top_value$VORP_ppg[i] <- add_log$Added_VORP_ppg[i]
+  
+  if (top_value$Add_Cost[i] > 0) {
+    top_value$Value[i] <- top_value$VORP[i] / top_value$Add_Cost[i]
+  } else {
+    top_value$Value[i] <- 999
+  }
+  
+  list <- faab_log[faab_log$Added_Player == top_value$Player[i] & faab_log$Success == "No", c(1, 5)]
+  
+  if (nrow(list) > 0) {
+    list$combo <- paste0(list$FF_Team, " ($", list$Bid, ")")
+    all_bids <- as.character(list$combo[1])
+    if (nrow(list) > 1) {
+      for (j in 2:nrow(list)) {
+        all_bids <- paste0(all_bids, ", ", list$combo[j])
+      }
+    }
+    top_value$Other_Bidders[i] <- all_bids
+  }
 }
