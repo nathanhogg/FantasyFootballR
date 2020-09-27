@@ -1,0 +1,954 @@
+---
+title: "FF_Season_Simulator.R"
+output: html_notebook
+Author: Nathan Hogg
+Date: 9/25/2020
+---
+
+# Overview & Introduction
+
+This script seeks to simulate an ESPN fantasy football season using projections from around the web in order to determine the likelihood that a team will make the playoffs.
+
+At it's most basic level, it uses a Monte Carlo simulation to play out a fantasy football league's schedule many, many times and records how many times each fantasy football team made the playoffs.
+
+Additional options can be added to expand the usefulness of the Monte Carlo simulation:
+- Ability to specify hypothetical trades and calculate the impact on playoff odds
+- Ability to specify different levels of injury risk per player
+- Ability to simulate waiver wire transactions to account for the impact of players not yet on fantasy rosters
+
+There will be five parts to this analysis:
+1. Getting everything set up
+2. Scraping the web for necessary data:
+   a. Scraping information from ESPN.com's v3 API
+   b. Scraping information from non-ESPN sources
+3. Combining the data sources to set up the simulation
+4. Running the Monte Carlo simulation
+5. Visualizing the output
+
+## Part 1 - Getting everything set up
+
+Let's start by clearing the environment and loading the necessary packages.
+
+```{r}
+
+rm(list = ls(all.names = TRUE))
+
+library(rvest)
+library(tidyr)
+library(xml2)
+library(magrittr)
+library(jsonlite)
+library(glue)
+library(stringr)
+
+```
+
+Now, we'll add in the necessary inputs for this simulation. 
+
+There are a couple of required inputs:
+- league_id <- the ESPN league id, often found in the league's URL
+- sims <- the number of times to run the Monte Carlo simulation (default = 1k)
+- sim_sd <- the standard deviation to apply to the league (default = 20)
+- proj_source <- what source we'd like to use for projecting player performance
+
+```{r}
+
+league_id <- 61643607 # 687109 (2QB), 367938 (J&B), 61643607 (BOAL), 30173 (Dynasty)
+sims <- 5000
+sim_sd <- 20
+proj_source <- "Fantasy Pros"
+
+```
+
+## Part 2a - Scraping information from ESPN.com's v3 API
+
+The first step in this analysis is to get the basic league information, such as how many teams are in the league, what teams are in the league, and what the league settings are.
+
+Let's start with the team names. We do this by building a custom url based on the league id, scraping the json data from ESPN, and selecting the specific info we want. We'll repeat this process several times to get all of the information we want.
+
+```{r}
+
+team_url <- paste0("https://fantasy.espn.com/apis/v3/games/ffl/seasons/2020/segments/0/leagues/",league_id)
+league_info <- fromJSON(team_url)
+
+ff_teams <- league_info$teams[,1:4]
+league_size <- nrow(ff_teams)
+current_week <- league_info$scoringPeriodId
+
+head(ff_teams)
+
+# Clean up the environment
+
+rm(team_url)
+
+```
+
+Next, let's grab the league setting data. In particular, we're looking for the following information:
+- League name (to be used in visualizations / output)
+- Roster composition (to be used in selecting the optimal lineup)
+- Scoring settings (to determine where to pull the projections from)
+- Number of playoff teams (to classify each team as playoff/non-playoff)
+
+```{r}
+
+# Pull data from the ESPN v3 API
+
+settings_url <- paste0("https://fantasy.espn.com/apis/v3/games/ffl/seasons/2020/segments/0/leagues/",league_id,"?view=mSettings")
+league_settings <- fromJSON(settings_url)
+settings <- league_settings$settings
+
+# Get basic league info
+
+league_name <- settings[['name']]
+n_playoff_teams <- settings$scheduleSettings$playoffTeamCount
+
+# Get league scoring settings
+
+league_scoring <- settings$scoringSettings$scoringItems[,c(4,6)]
+league_scoring$Stat <- NA
+
+if (nrow(league_scoring[league_scoring$statId == 53, ]) == 0) {
+  
+  ppr <- "standard"
+  
+  } else if (league_scoring$points[league_scoring$statId == 53] == 0.5) {
+  
+    ppr <- "half-point-ppr"
+  
+  } else if (league_scoring$points[league_scoring$statId == 53] == 1) {
+    
+    ppr <- "ppr"
+    
+}
+
+# Get positional limits
+
+roster_settings <- data.frame(matrix(data = NA, nrow = 25, ncol = 2))
+colnames(roster_settings) <- c("Pos","Count")
+pos_names <- c("QB", "TQB", "RB", "RB/WR", "WR", "WR/TE", "TE", "OP", "DT", "DE", "LB", "EDR", "DL", "CB", "S", "DB", "D/ST", "K", "P", "HC", "BE", "IR", "DP", "Flex", "??")
+pos_counts <- data.frame(settings$rosterSettings$lineupSlotCounts)
+roster_settings$Count <- t(pos_counts)
+roster_settings$Pos <- pos_names
+
+n_starters <- sum(roster_settings$Count) - roster_settings$Count[roster_settings$Pos == "BE"] - roster_settings$Count[roster_settings$Pos == "IR"]
+roster_size <- sum(roster_settings$Count)
+
+# Compute the number of starters for each position
+
+s_qb   <- roster_settings$Count[roster_settings$Pos == "QB"]
+s_rb   <- roster_settings$Count[roster_settings$Pos == "RB"]
+s_wr   <- roster_settings$Count[roster_settings$Pos == "WR"]
+s_te   <- roster_settings$Count[roster_settings$Pos == "TE"]
+s_ds   <- roster_settings$Count[roster_settings$Pos == "D/ST"]
+s_k    <- roster_settings$Count[roster_settings$Pos == "K"]
+s_flex <- roster_settings$Count[roster_settings$Pos == "Flex"]
+s_op   <- roster_settings$Count[roster_settings$Pos == "OP"]
+
+# Verify that the league settings are correct by printing the settings
+
+output <- paste0(league_name," is a ", league_size, " team league with ", ppr,
+                 " scoring settings and a starting lineup of ", s_qb, "/", 
+                 s_rb, "/", s_wr, "/", s_te, "/", s_flex, "/", s_op, "/", 
+                 s_ds, "/", s_k, " QB/RB/WR/TE/Flex/OP/Defense/K")
+print(output)
+
+# Clean up the environment
+
+rm(output); rm(pos_counts); rm(pos_names); rm(league_settings);
+rm(settings_url); 
+
+```
+
+Now we'll get the league's schedule. This will help us build a (partially) blank table that will be populated over and over again during the simulation. After we generate a simulated score for a team and week, we'll compare it against the match-up that week to assign a winner.
+
+```{r}
+
+schedule_url <- paste0("https://fantasy.espn.com/apis/v3/games/ffl/seasons/2020/segments/0/leagues/",league_id,"?view=mStandings")
+
+league_schedule_data <- fromJSON(schedule_url)
+league_schedule <- league_schedule_data$schedule
+league_schedule <- cbind(league_schedule$away, league_schedule$home, league_schedule$matchupPeriodId)
+
+league_schedule <- league_schedule[ ,-c(1,4)]
+colnames(league_schedule) <- c("homeTeamId", "homeTeamPoints", "awayTeamId", "awayTeamPoints", "matchupPeriodId")
+
+head(league_schedule)
+
+# Clean up the environment
+
+rm(schedule_url); rm(league_schedule_data)
+
+```
+
+The next step is to build a table that contains all of the players currently on a roster, with additional metadata on each of those players. The output is a data frame that tells us which players are on which fantasy team.
+
+```{r}
+
+url <- paste0("https://fantasy.espn.com/apis/v3/games/ffl/seasons/2020/segments/0/leagues/",league_id,"?view=mRoster")
+
+base_data <- fromJSON(url)
+
+teams <- base_data[['teams']]
+roster <- teams[['roster']]
+entries <- roster[['entries']]
+
+league_size <- length(teams$id)
+
+for(i in 1:league_size){
+
+  playerPoolEntry <- entries[[i]][[7]]
+  player <- playerPoolEntry[['player']]
+  
+  team_roster <- data.frame(matrix(data = NA, nrow = nrow(player), ncol = 10))
+  names <- c('id','firstName','lastName','fullName',
+             'proTeamId','defaultPositionId','active',
+             'injured','injuryStatus','ffTeamId')
+  colnames(team_roster) <- names
+  
+  for (j in 1:length(names)) {
+    
+    team_roster[,j] <- player[[names[j]]]
+    
+  }
+
+  team_roster$ffTeamId <- i
+  
+  if(i > 1){
+    
+    all_rosters <- rbind(all_rosters, team_roster)
+    
+  } else {
+    
+    all_rosters <- team_roster
+    
+  }
+  
+  rm(team_roster)
+  
+}
+
+head(all_rosters)
+
+# Clean up the environment
+
+rm(names); rm(player); rm(playerPoolEntry); rm(base_data); rm(teams);
+rm(entries); rm(roster); rm(i); rm(j); rm(url)
+
+```
+
+Next, we'll need some information on NFL teams in order to compute what constitutes a strong match-up vs. a weak match-up. There are two steps to this. First, we'll get the team information (primarily the proTeamId), and then we'll grab each team's schedule.
+
+```{r}
+
+nfl_teams_url <- "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams?&limit=50"
+
+nfl_teams_data <- fromJSON(nfl_teams_url)
+nfl_teams_temp <- nfl_teams_data$sports$leagues
+temp1 <- nfl_teams_temp[[1]][[6]]
+
+nfl_teams <- temp1[[1]][[1]]
+nfl_teams <- nfl_teams[,c(1,3,4,5,6,7,8,9)]
+
+head(nfl_teams)
+
+# Clean up the environment
+
+rm(nfl_teams_url); rm(nfl_teams_data); rm(nfl_teams_temp); rm(temp1);
+
+```
+
+As mentioned previously, we'll now grab the NFL schedule for the current year. The target output is a 33x18 data frame with a row for each team (and a FA filler row) and a column for each weekly opponent.
+
+```{r}
+  
+  url_nfl_schedule <- read_html("http://espn.go.com/nfl/schedulegrid")
+  nfl_schedule <- html_table(html_nodes(url_nfl_schedule, "table")[[1]], fill = TRUE)
+  
+  nfl_schedule <- data.frame(lapply(nfl_schedule, 
+                                    FUN = function(x) gsub("@", "", x)))
+  nfl_schedule <- data.frame(lapply(nfl_schedule, 
+                                    FUN = function(x) gsub("JAX", "JAC", x)))
+  nfl_schedule <- data.frame(lapply(nfl_schedule, as.character))
+  
+  colnames(nfl_schedule) <- unlist(nfl_schedule[2, ], use.names = FALSE)
+  nfl_schedule <- nfl_schedule[-c(1,2), ]
+  
+  FA <- data.frame(t(c("FA", rep("BYE", 17))))
+  
+  names(FA) <- names(nfl_schedule)
+  nfl_schedule <- rbind(nfl_schedule, FA)
+  rm(FA)
+  
+  nfl_schedule$TEAM <- as.character(nfl_schedule$TEAM)
+  nfl_schedule$TEAM[nfl_schedule$TEAM == "WSH"] <- "WAS"
+  
+  head(nfl_schedule)
+  
+  # Clean up the environment
+  
+  rm(url_nfl_schedule)
+
+```
+
+## Part 2b - Scraping data from non-ESPN sources
+
+First, we'll get projections for how each player is expected to do this season.
+
+There are a couple of complications with this data:
+1. Currently, it only projects for the full season (not for updated, in-season projections)
+2. If a player is injured, there is no way to determine how long they'll be out or who will replace them
+
+Potential work-arounds:
+1. Grab current week projections and adjust them for PVO data for expected weekly (doesn't get around issue 2)
+2. Manually adjust expected weekly projections (time consuming, annoying)
+
+```{r}
+
+  # QB projections
+  url_qb <- read_html("https://www.fantasypros.com/nfl/projections/qb.php?week=draft")
+  qb_proj <- html_table(html_nodes(url_qb, "table")[[1]], fill = TRUE, header = TRUE)
+  colnames(qb_proj) <- qb_proj[1, ]
+  qb_proj <- qb_proj[-1, -c(2, 3, 4, 5, 6, 7, 8, 9, 10)]
+  qb_proj$Pos <- "QB"
+  qb_proj$Team <- lapply(qb_proj$Player, function(x) tail(strsplit(x ,split=" ")[[1]], 1))
+  qb_proj$Player <- gsub("\\s*\\w*$", "", qb_proj$Player)
+  qb_proj <- qb_proj[ , c(1, 4, 3, 2)]
+  
+  #RB Projections
+  url_rb <- read_html("https://www.fantasypros.com/nfl/projections/rb.php?week=draft")
+  rb_proj <- html_table(html_nodes(url_rb, "table")[[1]], fill = TRUE, header = TRUE)
+  colnames(rb_proj) <- rb_proj[1, ]
+  rb_proj <- rb_proj[-1,]
+  rb_proj$FPTS <- as.numeric(rb_proj$FPTS)
+  
+  if (ppr == "half-point-ppr") {
+    
+    rb_proj$FPTS <- rb_proj$FPTS + 0.5 * as.numeric(rb_proj$REC)
+    
+  } else if(ppr == "ppr") {
+    
+    rb_proj$FPTS <- rb_proj$FPTS + as.numeric(rb_proj$REC)
+    
+  }
+  
+  rb_proj <- rb_proj[, -c(2, 3, 4, 5, 6, 7, 8)]
+  rb_proj$Pos <- "RB"
+  rb_proj$Team <- lapply(rb_proj$Player, function(x) tail(strsplit(x ,split=" ")[[1]], 1))
+  rb_proj$Player <- gsub("\\s*\\w*$", "", rb_proj$Player)
+  rb_proj <- rb_proj[ , c(1, 4, 3, 2)]
+  
+  # WR Projections
+  url_wr <- read_html("https://www.fantasypros.com/nfl/projections/wr.php?week=draft")
+  wr_proj <- html_table(html_nodes(url_wr, "table")[[1]], fill = TRUE, header = TRUE)
+  colnames(wr_proj) <- wr_proj[1, ]
+  wr_proj <- wr_proj[-1,]
+  wr_proj$FPTS <- as.numeric(wr_proj$FPTS)
+  
+  if (ppr == "half-point-ppr") {
+    
+    wr_proj$FPTS <- wr_proj$FPTS + 0.5 * as.numeric(wr_proj$REC)
+    
+  } else if(ppr == "ppr") {
+    
+    wr_proj$FPTS <- wr_proj$FPTS + as.numeric(wr_proj$REC)
+    
+  }
+  
+  wr_proj <- wr_proj[, -c(2, 3, 4, 5, 6, 7, 8)]
+  wr_proj$Pos <- "WR"
+  wr_proj$Team <- lapply(wr_proj$Player, function(x) tail(strsplit(x ,split=" ")[[1]], 1))
+  wr_proj$Player <- gsub("\\s*\\w*$", "", wr_proj$Player)
+  wr_proj <- wr_proj[ , c(1, 4, 3, 2)]
+  
+  # TE Projections
+  url_te <- read_html("https://www.fantasypros.com/nfl/projections/te.php?week=draft")
+  te_proj <- html_table(html_nodes(url_te, "table")[[1]], fill = TRUE, header = TRUE)
+  colnames(te_proj) <- te_proj[1, ]
+  te_proj <- te_proj[-1,]
+  te_proj$FPTS <- as.numeric(te_proj$FPTS)
+  
+  if (ppr == "half-point-ppr") {
+    
+    te_proj$FPTS <- te_proj$FPTS + 0.5 * as.numeric(te_proj$REC)
+    
+  } else if(ppr == "ppr") {
+    
+    te_proj$FPTS <- te_proj$FPTS + as.numeric(te_proj$REC)
+    
+  }
+  
+  te_proj <- te_proj[, -c(2, 3, 4, 5)]
+  te_proj$Pos <- "TE"
+  te_proj$Team <- lapply(te_proj$Player, function(x) tail(strsplit(x ,split=" ")[[1]], 1))
+  te_proj$Player <- gsub("\\s*\\w*$", "", te_proj$Player)
+  te_proj <- te_proj[ , c(1, 4, 3, 2)]
+  
+  # D/ST Projections
+  url_dst <- read_html("https://www.fantasypros.com/nfl/projections/dst.php?week=draft")
+  dst_proj <- html_table(html_nodes(url_dst, "table")[[1]], fill = TRUE, header = TRUE)
+  # colnames(dst_proj) <- dst_proj[1, ]
+  dst_proj$Pos <- "D/ST"
+  dst_proj <- dst_proj[, -c(2, 3, 4, 5, 6, 7, 8, 9)]
+  dst_proj$Team <- lapply(dst_proj$Player, function(x) tail(strsplit(x ,split=" ")[[1]], 1))
+  dst_proj$Player <- gsub("\\s*\\w*$", "", dst_proj$Player)
+  dst_proj$Player <- paste0(word(dst_proj$Player, -1), " ", dst_proj$Pos)
+  dst_proj <- dst_proj[ , c(1, 4, 3, 2)]
+  dst_proj$Player <- paste(dst_proj$Team, dst_proj$Pos)
+  dst_proj <- as.data.frame(lapply(dst_proj, unlist))
+  
+  dst_proj <- merge(dst_proj, nfl_teams, by.x = 'Team', by.y = 'name', all.x = TRUE)
+  dst_proj <- dst_proj[,c(2,9,3,4)]
+  colnames(dst_proj) <- c("Player", "Team", "Pos", "FPTS")
+  
+  # K Projections
+  url_k <- read_html("https://www.fantasypros.com/nfl/projections/k.php?week=draft")
+  k_proj <- html_table(html_nodes(url_k, "table")[[1]], fill = TRUE, header = TRUE)
+  k_proj <- k_proj[ , -c(2, 3, 4)]
+  k_proj$Pos <- "K"
+  k_proj$Team <- lapply(k_proj$Player, function(x) tail(strsplit(x ,split=" ")[[1]], 1))
+  k_proj$Player <- gsub("\\s*\\w*$", "", k_proj$Player)
+  k_proj <- k_proj[ , c(1, 4, 3, 2)]
+  
+  projections <- rbind(qb_proj, rb_proj, wr_proj, te_proj, dst_proj, k_proj)
+  
+  # Set classes
+  projections$Player <- as.character(projections$Player)
+  projections$Team <- as.character(projections$Team)
+  projections$Pos <- as.character(projections$Pos)
+  projections$FPTS <- as.numeric(projections$FPTS)
+  
+  head(projections)
+  
+  # Clean up the environment
+  
+  rm(dst_proj); rm(k_proj); rm(qb_proj); rm(rb_proj); rm(te_proj); rm(url_dst);
+  rm(url_k); rm(url_qb); rm(url_rb); rm(url_te); rm(url_wr); rm(wr_proj);
+
+```
+
+We need to edit some players names in these projections in order to properly merge them with the ESPN rosters
+
+```{r}
+
+projections$Player[projections$Player == "Patrick Mahomes II"] <- "Patrick Mahomes"
+projections$Player[projections$Player == "Chris Herndon IV"] <- "Chris Herndon"
+projections$Player[projections$Player == "Darrell Henderson"] <- "Darrell Henderson Jr."
+projections$Player[projections$Player == "D.J. Chark Jr."] <- "DJ Chark Jr."
+projections$Player[projections$Player == "D.J. Moore"] <- "DJ Moore"
+projections$Player[projections$Player == "D.K. Metcalf"] <- "DK Metcalf"
+projections$Player[projections$Player == "Duke Johnson Jr."] <- "Duke Johnson"
+
+head(projections)
+
+```
+
+The final step in our data scraping is to get the table for how each position fares vs. each NFL team, aka "Player vs. Opponent" data. 
+
+Because ESPN has been super annoying and removed this table from existence, I'm going to build a fake table where all of the values are set to default. We can revisit this section later. 
+
+```{r}
+
+pvo <- data.frame(matrix(data = 1, nrow = 33, ncol = 8))
+colnames(pvo) <- c("Team", "Team_Name", "QB", "RB", "WR", "TE", "K", "DST")
+
+pvo$Team <- nfl_schedule$TEAM
+pvo <- pvo[,c(1,3,4,5,6,7,8)]
+
+# Set classes
+pvo$Team <- as.character(pvo$Team)
+
+head(pvo)
+
+```
+
+## Part 3. - Combining the data sources to set up the simulation
+
+Let's start combining some of the tables we've captured so far
+
+```{r}
+
+roster_weekly <- merge(all_rosters, projections, by.x = 'fullName', by.y = 'Player', all.x = TRUE)
+roster_weekly <- merge(roster_weekly, nfl_schedule, by.x = 'Team', by.y = 'TEAM', all.x = TRUE)
+
+all_qb <- roster_weekly[roster_weekly$Pos == "QB", ]
+  all_rb <- roster_weekly[roster_weekly$Pos == "RB", ]
+  all_wr <- roster_weekly[roster_weekly$Pos == "WR", ]
+  all_te <- roster_weekly[roster_weekly$Pos == "TE", ]
+  all_k  <- roster_weekly[roster_weekly$Pos == "K", ]
+  all_ds <- roster_weekly[roster_weekly$Pos == "D/ST", ]
+  
+for (j in 14:30) {
+    all_qb <- merge(all_qb, pvo[c("Team", "QB")], by.x = j, by.y = "Team", all.x = "TRUE")
+    all_rb <- merge(all_rb, pvo[c("Team", "RB")], by.x = j, by.y = "Team", all.x = "TRUE")
+    all_wr <- merge(all_wr, pvo[c("Team", "WR")], by.x = j, by.y = "Team", all.x = "TRUE")
+    all_te <- merge(all_te, pvo[c("Team", "TE")], by.x = j, by.y = "Team", all.x = "TRUE")
+    all_k  <- merge(all_k,  pvo[c("Team", "K")],  by.x = j, by.y = "Team", all.x = "TRUE")
+    all_ds <- merge(all_ds, pvo[c("Team", "DST")], by.x = j, by.y = "Team", all.x = "TRUE")
+  }
+
+ roster_cols <- c("Team", "fullName", "id", "firstName", "lastName", "proTeamId", "defaultPositionId", "active", "injured", "injuryStatus", "ffTeamId", "Pos", "FPTS", "Week1", "Week2", "Week3", "Week4", "Week5", "Week6", "Week7","Week8", "Week9", "Week10", "Week11", "Week12", "Week13", "Week14", "Week15", "Week16", "Week17")
+ 
+ all_qb <- all_qb[ , -c(1:17)]; colnames(all_qb) <- roster_cols
+  all_rb <- all_rb[ , -c(1:17)]; colnames(all_rb) <- roster_cols
+  all_wr <- all_wr[ , -c(1:17)]; colnames(all_wr) <- roster_cols
+  all_te <- all_te[ , -c(1:17)]; colnames(all_te) <- roster_cols
+  all_k  <- all_k[ , -c(1:17)];  colnames(all_k) <- roster_cols
+  all_ds <- all_ds[ , -c(1:17)]; colnames(all_ds) <- roster_cols
+  
+roster_proj <- rbind(all_qb, all_rb, all_wr, all_te, all_k, all_ds)
+
+for (k in 14:30) {
+    
+    roster_proj[ , k] <- roster_proj[ , k] * roster_proj$FPTS / 16
+  
+  }
+
+roster_proj <- roster_proj[is.na(roster_proj$Team) == 0, ]
+head(roster_proj)
+
+# Clean up the environment
+
+rm(all_qb); rm(all_rb); rm(all_wr); rm(all_te); rm(all_k); rm(all_ds);
+rm(roster_weekly);
+
+```
+
+In this next section, we'll manually adjust some players' projections due to injuries:
+- CMC (and Mike Davis)
+- Saquon (and )
+- Mostert
+- Courtland Sutton
+- Marlon Mack
+- Devine Ozigbo (and James Robinson)
+- Deebo Samuel
+- Sterling Shephard
+- 
+
+```{r}
+
+roster_proj[roster_proj$fullName == "Christian McCaffrey", 16:20] <- 0
+roster_proj[roster_proj$fullName == "Mike Davis", 16:20] <- 10
+roster_proj[roster_proj$fullName == "Saquon Barkley", 16:30] <- 0
+roster_proj[roster_proj$fullName == "Raheem Mostert", 16:19] <- 0
+roster_proj[roster_proj$fullName == "Courtland Sutton", 16:30] <- 0
+roster_proj[roster_proj$fullName == "Marlon Mack", 16:30] <- 0
+roster_proj[roster_proj$fullName == "Devine Ozigbo", 16:20] <- 0
+roster_proj[roster_proj$fullName == "Deebo Samuel", 16:17] <- 0
+roster_proj[roster_proj$fullName == "Sterling Shepard", 16:19] <- 0
+roster_proj[roster_proj$fullName == "Le'Veon Bell", 16:19] <- 0
+
+
+```
+
+Calculate the value of a waiver wire player based on the number of starting spots of each position
+
+```{r}
+
+w_qb <- 16 - 2 * (s_qb + s_op); 
+w_rb <- 12 - (s_rb + s_flex + s_op); 
+w_wr <- 13 - (s_rb + s_flex + s_op);
+w_te <- 8 - 2 * s_te; 
+w_dst <- 7; 
+w_k <- 8; 
+
+```
+
+Build the weekly expected points for each team
+
+1. Create the blank weekly expected data frame with dimensions league_size x 18
+2. Build a data frame with fake waiver wire players to ensure each roster can be filled
+3. Select the best lineup for each team for each week
+   a. Start with the first team in the league
+   b. Separate that team's roster out and combine with the fake waiver wire players
+   c. Start with week 1:
+      1. Break out each roster by position
+      2. Starting with the most restrictive lineup positions (QB, RB, WR, TE, DST, K):
+         a. Choose the highest expected scoring player at that position for that week, and add it to the score
+         b. Manually set that player's expected score to 0 for that week so it is not counted again
+         c. Loop until the number of players needed for that position are filled
+      3. Recombine the position data frames
+      4. For lineup positions with multiple options (Flex, OP):
+         1. Break-out the eligible players for that position
+         2. Choose the highest expected scoring player at that position for that week, and add it to the score
+         3. Manually set that player's expected score to 0 for that week so it is not counted again
+         4. Loop until the number of players needed for that position are filled
+         5. Recombine the position data frames
+      5. Once all positions have been filled, transfer the score variable into the weekly expected data frame
+   d. Loop through each week
+   e. Loop through each team
+
+```{r}
+
+# 1. Create the blank weekly expected data frame with dimensions league_size x 18
+
+weekly_expected <- data.frame(matrix(0, nrow = league_size, ncol = 18))
+colnames(weekly_expected) <- c("FF_Team_ID", "Wk1", "Wk2", "Wk3", "Wk4", "Wk5", "Wk6", "Wk7", "Wk8", "Wk9", "Wk10", "Wk11", "Wk12", "Wk13", "Wk14", "Wk15", "Wk16", "Wk17")
+weekly_expected$FF_Team_ID <- as.integer(1:league_size)
+
+# 2. Build a data frame with fake waiver wire players to ensure each roster can be filled
+
+for (i in 1) {
+  
+waiver_qb <- data.frame(matrix(data = NA, nrow = 5, ncol = ncol(roster_proj)))
+colnames(waiver_qb) <- colnames(roster_proj)
+waiver_qb$Pos <- "QB"; waiver_qb[ ,c(14:30)] <- w_qb
+
+waiver_rb <- data.frame(matrix(data = NA, nrow = 5, ncol = ncol(roster_proj)))
+colnames(waiver_rb) <- colnames(roster_proj)
+waiver_rb$Pos <- "RB"; waiver_rb[ ,c(14:30)] <- w_rb
+
+waiver_wr <- data.frame(matrix(data = NA, nrow = 5, ncol = ncol(roster_proj)))
+colnames(waiver_wr) <- colnames(roster_proj)
+waiver_wr$Pos <- "WR"; waiver_wr[ ,c(14:30)] <- w_wr
+
+waiver_te <- data.frame(matrix(data = NA, nrow = 5, ncol = ncol(roster_proj)))
+colnames(waiver_te) <- colnames(roster_proj)
+waiver_te$Pos <- "TE"; waiver_te[ ,c(14:30)] <- w_te
+
+waiver_dst <- data.frame(matrix(data = NA, nrow = 5, ncol = ncol(roster_proj)))
+colnames(waiver_dst) <- colnames(roster_proj)
+waiver_dst$Pos <- "D/ST"; waiver_dst[ ,c(14:30)] <- w_dst
+
+waiver_k <- data.frame(matrix(data = NA, nrow = 5, ncol = ncol(roster_proj)))
+colnames(waiver_k) <- colnames(roster_proj)
+waiver_k$Pos <- "K"; waiver_k[ ,c(14:30)] <- w_k
+
+waivers <- rbind(waiver_qb, waiver_rb, waiver_wr, waiver_te, waiver_dst, waiver_k)
+
+rm(waiver_qb); rm(waiver_rb); rm(waiver_wr); rm(waiver_te); rm(waiver_dst); rm(waiver_k); 
+  
+}
+rm(i)
+
+# 3. Select the best lineup for each team for each week
+
+   # a. Start with the first team in the league
+
+   for (i in 1:league_size) {
+     
+     # b. Separate that team's roster out and combine with the fake waiver wire players
+     
+     roster <- rbind(roster_proj[roster_proj$ffTeamId == i, ], waivers)
+     
+     # c. Start with week 1
+     
+     for (j in 1:17) {
+       
+       score <- 0
+       
+       # 1. Start with the positions that are most restrictive:
+       
+       # a. Separate out the specific position
+       roster_qb <- roster[roster$Pos == "QB", ]
+       
+       if (s_qb > 0) {
+         
+         for (k in 1:s_qb) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_qb[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_qb[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_qb[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       }
+
+       # a. Separate out the specific position
+       roster_rb <- roster[roster$Pos == "RB", ] 
+         
+       if (s_rb > 0) {
+         
+         for (k in 1:s_rb) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_rb[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_rb[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_rb[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       }       
+       
+       # a. Separate out the specific position
+       roster_wr <- roster[roster$Pos == "WR", ] 
+         
+       if (s_wr > 0) {
+         
+         for (k in 1:s_wr) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_wr[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_wr[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_wr[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       }         
+   
+       # a. Separate out the specific position
+       roster_te <- roster[roster$Pos == "TE", ]
+         
+       if (s_te > 0) {
+         
+         for (k in 1:s_te) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_te[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_te[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_te[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       } 
+       
+       # a. Separate out the specific position
+       roster_ds <- roster[roster$Pos == "D/ST", ]
+        
+       if (s_ds > 0) {
+         
+         for (k in 1:s_ds) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_ds[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_ds[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_ds[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       } 
+       
+       # a. Separate out the specific position
+       roster_k <- roster[roster$Pos == "K", ]
+         
+       if (s_k > 0) {
+         
+         for (k in 1:s_k) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_k[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_k[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_k[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       }        
+       
+       # 3. Recombine the positional data frames
+       
+       roster <- rbind(roster_qb, roster_rb, roster_wr, roster_te, roster_ds, roster_k)
+       
+       # 4. For lineup positions with multiple options:
+       
+       roster_flex <- roster[roster$Pos == "RB" | roster$Pos == "WR" | roster$Pos == "TE",]
+       roster_notflex <- roster[roster$Pos == "QB" | roster$Pos == "D/ST" | roster$Pos == "K",]
+
+       if (s_flex > 0) {
+         
+         for (k in 1:s_flex) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_flex[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_flex[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_flex[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       }
+       
+       roster <- rbind(roster_flex, roster_notflex)
+       
+       roster_op <- roster[roster$Pos == "QB" | roster$Pos == "RB" | roster$Pos == "WR" | roster$Pos == "TE",]
+       roster_notop <- roster[roster$Pos == "D/ST" | roster$Pos == "K",]
+       
+       if (s_op > 0) {
+         
+         for (k in 1:s_op) {
+           
+           # b. Find the row with the highest score for that week
+           index <- which.max(roster_op[ , j + 13])
+           
+           # c. Add that player's score to the total
+           score <- score + roster_op[index, j + 13]
+           
+           # d. Manually set that player's expected score to 0 for that week
+           roster_op[index, j + 13] <- 0
+           
+           rm(index)
+           
+         }
+         
+         rm(k)
+         
+       }
+       
+       weekly_expected[i,j+1] <- score
+       
+       rm(roster_ds); rm(roster_flex); rm(roster_k); rm(roster_notflex);
+       rm(roster_notop); rm(roster_op); rm(roster_qb); rm(roster_rb); rm(roster_te);
+       rm(roster_wr);
+       
+     }
+       
+   rm(roster)    
+     
+   }
+  
+weekly_expected
+
+```
+
+## Part 4 - Run the Monte Carlo simulation
+
+```{r}
+
+# Create a blank data frame to fill up as the simulation runs
+
+wins <- cbind(ff_teams$id, data.frame(matrix(data = 0, nrow = league_size, ncol = sims)))
+colnames(wins) <- c("id", 1:sims)
+  
+points <- cbind(ff_teams$id, data.frame(matrix(data = 0, nrow = league_size, ncol = sims)))
+colnames(points) <- c("id", 1:sims)
+  
+standings <- cbind(ff_teams$id, data.frame(matrix(data = 0, nrow = league_size, ncol = sims)))
+colnames(standings) <- c("id", 1:sims)
+
+for (i in 1:sims) {
+  
+  sim_scores <- weekly_expected
+  variation <- matrix(rnorm(17*league_size, mean = 0, sd = sim_sd), nrow = league_size, ncol = 17)
+  sim_scores[ , 2:18] <- sim_scores[ , 2:18] + variation
+  
+  sim_schedule <- league_schedule
+  
+  for (k in ((current_week-1)*league_size/2+1):nrow(sim_schedule)) {
+    
+    sim_schedule$homeTeamPoints[k] <- sim_scores[sim_schedule$homeTeamId[k],sim_schedule$matchupPeriodId[k] + 1]
+    sim_schedule$awayTeamPoints[k] <- sim_scores[sim_schedule$awayTeamId[k],sim_schedule$matchupPeriodId[k] + 1]
+
+  }
+  
+  for (j in 1:nrow(sim_schedule)) {
+    
+    if (sim_schedule$homeTeamPoints[j] > sim_schedule$awayTeamPoints[j]) {
+      
+      sim_schedule$winner[j] <- sim_schedule$homeTeamId[j]
+        
+    } else if (sim_schedule$homeTeamPoints[j] < sim_schedule$awayTeamPoints[j]) {
+      
+      sim_schedule$winner[j] <- sim_schedule$awayTeamId[j]
+    
+    } else {
+      
+      sim_schedule$winner[j] <- 0
+      
+    }
+    
+  }
+  
+  # Count the wins and sum the points for this iteration of the simulation
+  
+  for (l in 1:league_size) {
+    
+    wins[l, i + 1] <- nrow(sim_schedule[sim_schedule$winner == l,])
+    points[l, i + 1] <- sum(sim_schedule$homeTeamPoints[sim_schedule$homeTeamId == l]) +
+                        sum(sim_schedule$awayTeamPoints[sim_schedule$awayTeamId == l])
+    
+  }
+  
+  # Update on progress of the for loop
+  
+  if (i %% 100 == 0) {
+  
+    print(paste0(i/sims*100,"%"))
+  
+  }
+
+}
+
+win_points <- data.frame(wins$id, wins[ ,2:(sims + 1)] + points[ ,2:(sims + 1)]/10000)
+colnames(win_points) <- colnames(wins)
+
+standings <- data.frame(win_points$id, apply(-win_points[ , 2:(sims + 1)], 2, rank))
+colnames(standings) <- colnames(win_points)
+
+summary <- data.frame(paste(ff_teams$location, ff_teams$nickname), 0, 0, 0, 0)
+colnames(summary) <- c("Team", "Avg. Wins", "Avg. Points", "Avg. Standings", "Playoff Odds")
+
+for (i in 1:nrow(summary)) {
+  
+  summary[i,2] <- rowMeans(wins[i, 2:(sims + 1)])
+  summary[i,3] <- rowMeans(points[i, 2:(sims + 1)])
+  summary[i,4] <- rowMeans(standings[i, 2:(sims + 1)])
+  
+  playoffs <- data.frame(standings[i,2:(sims+1)])
+  n_playoffs <- sum(playoffs <= n_playoff_teams)
+  summary[i,5] <- n_playoffs / sims * 100
+  
+}
+
+summary$`Avg. Wins` <- round(summary$`Avg. Wins`, digits = 2)
+summary$`Avg. Points` <- round(summary$`Avg. Points`, digits = 1)
+summary$`Avg. Standings` <- round(summary$`Avg. Standings`, digits = 2)
+summary$`Playoff Odds` <- round(summary$`Playoff Odds`, digits = 1)
+
+summary
+
+```
+
